@@ -11,6 +11,7 @@
 workspace/*
 # Sauf le fichier .gitkeep pour conserver le dossier vide dans le dépôt
 !workspace/.gitkeep
+!assets/.gitkeep
 
 # ========================
 # 3. Environnement Python
@@ -21,7 +22,9 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
-
+workspace/
+assets/
+assets/*
 # ========================
 # 4. Fichiers systèmes (Mac/Windows)
 # ========================
