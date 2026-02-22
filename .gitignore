@@ -12,6 +12,7 @@ workspace/*
 # Sauf le fichier .gitkeep pour conserver le dossier vide dans le dépôt
 !workspace/.gitkeep
 !assets/.gitkeep
+!assets/music/.gitkeep
 
 # ========================
 # 3. Environnement Python
