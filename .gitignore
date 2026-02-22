@@ -1,0 +1,36 @@
+# ========================
+# 1. Secrets et Config
+# ========================
+# NE JAMAIS COMMITER LE FICHIER .env ! Il contient vos clés API.
+.env
+
+# ========================
+# 2. Fichiers générés par le bot
+# ========================
+# On ignore tout le contenu du dossier workspace (vidéos, audios, images)
+workspace/*
+# Sauf le fichier .gitkeep pour conserver le dossier vide dans le dépôt
+!workspace/.gitkeep
+
+# ========================
+# 3. Environnement Python
+# ========================
+venv/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ========================
+# 4. Fichiers systèmes (Mac/Windows)
+# ========================
+.DS_Store
+Thumbs.db
+
+# ========================
+# 5. Éditeurs de code (VSCode, PyCharm...)
+# ========================
+.vscode/
+.idea/
+*.swp

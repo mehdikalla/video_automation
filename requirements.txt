@@ -1,0 +1,18 @@
+# --- Cœur de l'application ---
+python-dotenv
+pydantic
+requests
+
+# --- Intelligence Artificielle (Écosystème Google) ---
+# Le SDK officiel pour Gemini (Génération de texte, JSON, et Images)
+google-generativeai
+
+# Le SDK pour la synthèse vocale de Google
+google-cloud-texttospeech
+
+# --- Traitement Vidéo et Image ---
+moviepy
+Pillow
+ffmpeg-python
+fal-client
+runwayml
