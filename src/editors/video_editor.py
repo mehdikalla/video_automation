@@ -1,93 +1,143 @@
+import json
+import argparse
+import sys
 import os
 import subprocess
-import imageio_ffmpeg
-from moviepy import AudioFileClip
-from src.models import VideoScript
-from config import WORKSPACE_DIR
+from pathlib import Path
 
-def assemble_video(script: VideoScript, project_id: str) -> str:
-    print(f"Assemblage découplé (synchronisation par durée globale) pour '{project_id}'...")
-    
-    project_dir = WORKSPACE_DIR / project_id
-    output_path = project_dir / "final_video.mp4"
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+def format_time_ass(seconds: float) -> str:
+    """Convertit des secondes en format temporel ASS (H:MM:SS.cs)"""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = seconds % 60
+    return f"{h}:{m:02d}:{s:05.2f}"
 
-    if not script.full_audio_path or not os.path.exists(script.full_audio_path):
-        raise FileNotFoundError("Piste vocale globale introuvable.")
+def generate_ass_subtitles(timestamps_path: Path, output_ass_path: Path):
+    """Génère un fichier de sous-titres stylisé à partir des données de Whisper."""
+    if not timestamps_path.exists():
+        raise FileNotFoundError(f"Fichier d'horodatage introuvable : {timestamps_path}")
 
-    # 1. Extraction de la durée totale de la voix off
-    audio = AudioFileClip(script.full_audio_path)
-    total_audio_duration = audio.duration
-    audio.close()
+    with open(timestamps_path, 'r', encoding='utf-8') as f:
+        words_data = json.load(f)
 
-    valid_images = [s.image_path for s in script.scenes if s.image_path and os.path.exists(s.image_path)]
-    if not valid_images:
-        raise ValueError("Aucune image valide trouvée pour l'assemblage.")
+    # En-tête ASS : Définit la résolution 9:16 et un style de sous-titre "Shorts" (Gros, Jaune, Contour noir)
+    ass_header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 768
+PlayResY: 1344
 
-    # 2. Calcul mathématique de la durée par image
-    num_images = len(valid_images)
-    time_per_image = total_audio_duration / num_images
-    crossfade_dur = 0.5
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: ShortsStyle,Arial,75,&H0000FFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,5,10,10,250,1
 
-    inputs = []
-    filter_chains = []
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
 
-    # 3. Préparation des flux vidéo
-    for i, img_path in enumerate(valid_images):
-        inputs.extend(["-i", str(img_path)])
+    with open(output_ass_path, 'w', encoding='utf-8') as f:
+        f.write(ass_header)
         
-        # Allongement de la durée pour permettre le fondu croisé (sauf la dernière image)
-        v_dur = time_per_image + crossfade_dur if i < num_images - 1 else time_per_image
-        frames = int(v_dur * 24)
+        # Regroupement des mots (Chunking) : on affiche 2 à 3 mots par écran pour un rythme dynamique
+        chunk = []
+        for idx, word_info in enumerate(words_data):
+            chunk.append(word_info)
+            # On coupe si le chunk atteint 3 mots, ou si c'est le dernier mot, ou s'il y a un grand silence
+            if len(chunk) == 3 or idx == len(words_data) - 1:
+                start_time = format_time_ass(chunk[0]['start'])
+                end_time = format_time_ass(chunk[-1]['end'])
+                text = " ".join([w['word'] for w in chunk]).strip()
+                
+                # Écriture de la ligne de dialogue
+                f.write(f"Dialogue: 0,{start_time},{end_time},ShortsStyle,,0,0,0,,{text}\n")
+                chunk = []
 
-        zoom_expr = f"1.0+0.3*(1-pow(1-min(on/{frames},1),3))"
-        chain_v = f"[{i}:v]format=yuv420p,scale=1024x1792,zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s=1024x1792:fps=24[v{i}]"
-        filter_chains.append(chain_v)
+    print(f"Sous-titres dynamiques générés : {output_ass_path}")
 
-    # 4. Transitions
-    if num_images > 1:
-        current_offset = 0.0
-        last_v = "[v0]"
-        for i in range(1, num_images):
-            current_offset += time_per_image
-            v_out = f"[v_xfade{i}]" if i < num_images - 1 else "[v_final]"
-            xfade = f"{last_v}[v{i}]xfade=transition=fade:duration={crossfade_dur}:offset={current_offset}{v_out}"
-            filter_chains.append(xfade)
-            last_v = v_out
-    else:
-        filter_chains.append("[v0]copy[v_final]")
+def assemble_final_video(input_json_path: str):
+    print(f"Démarrage du Module 5 (Montage Final) à partir de : {input_json_path}")
+    
+    # AJOUT DE .resolve() ICI pour forcer le chemin absolu
+    input_path = Path(input_json_path).resolve() 
+    
+    if not input_path.exists():
+        raise FileNotFoundError(f"Le fichier {input_json_path} est introuvable.")
 
-    # 5. Mixage audio (Voix off continue + Musique)
-    inputs.extend(["-i", str(script.full_audio_path)])
-    voice_idx = num_images
+    with open(input_path, 'r', encoding='utf-8') as f:
+        script_data = json.load(f)
 
-    bg_input = []
-    if script.bg_music_path and os.path.exists(script.bg_music_path):
-        bg_idx = num_images + 1
-        bg_input = ["-stream_loop", "-1", "-i", str(script.bg_music_path)]
-        chain_bg = f"[{voice_idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo[voice];[{bg_idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,volume=0.15[bg_vol];[voice][bg_vol]amix=inputs=2:duration=first:dropout_transition=2[a_final]"
-        filter_chains.append(chain_bg)
-    else:
-        filter_chains.append(f"[{voice_idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo[a_final]")
+    project_dir = input_path.parent
+    audio_path = project_dir / "audio" / "voiceover.mp3"
+    timestamps_path = project_dir / "audio" / "timestamps.json"
+    
+    if not audio_path.exists():
+        raise FileNotFoundError("La piste vocale globale (voiceover.mp3) est introuvable.")
+        
+    # 1. Génération des sous-titres
+    ass_path = project_dir / "subtitles.ass"
+    generate_ass_subtitles(timestamps_path, ass_path)
 
-    complex_filter = ";".join(filter_chains)
+    # 2. Préparation du fichier de concaténation pour FFmpeg
+    concat_list_path = project_dir / "concat.txt"
+    valid_videos = []
+    
+    with open(concat_list_path, "w", encoding="utf-8") as f:
+        for scene in script_data.get("scenes", []):
+            video_str = scene.get("video_path")
+            if video_str and Path(video_str).exists():
+                # On écrit le chemin relatif depuis le dossier du projet pour éviter les bugs de caractères Windows/Linux
+                rel_path = Path(video_str).relative_to(project_dir)
+                f.write(f"file '{rel_path}'\n")
+                valid_videos.append(video_str)
 
-    command = [ffmpeg_exe, "-y"] + inputs + bg_input + [
-        "-filter_complex", complex_filter,
-        "-map", "[v_final]",
-        "-map", "[a_final]",
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-shortest",
-        str(output_path)
-    ]
+    if not valid_videos:
+        raise RuntimeError("Aucune vidéo valide n'a été trouvée pour l'assemblage.")
 
-    print("Rendu FFmpeg avec audio continu...")
-    process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    output_final_path = project_dir / "FINAL_VIDEO.mp4"
 
-    if process.returncode != 0:
-        raise RuntimeError(f"Erreur de rendu :\n{process.stderr}")
+    print("Mixage et incrustation via FFmpeg en cours...")
+    
+    try:
+        # Exécution dans le dossier du projet pour faciliter les chemins relatifs des filtres
+        command = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", "concat.txt",  # Flux vidéo (liste des clips)
+            "-i", "audio/voiceover.mp3",                       # Flux audio global
+            "-vf", "ass=subtitles.ass",                        # Incrustation physique des sous-titres
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-shortest",                                       # Coupe la vidéo quand l'audio se termine
+            "FINAL_VIDEO.mp4"
+        ]
+        
+        process = subprocess.run(command, cwd=str(project_dir), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        
+        if process.returncode != 0:
+            raise RuntimeError(f"Erreur FFmpeg :\n{process.stderr}")
+            
+    except Exception as e:
+        raise RuntimeError(f"Échec de l'assemblage final : {e}")
+        
+    # Nettoyage du fichier de concaténation
+    if concat_list_path.exists():
+        concat_list_path.unlink()
 
-    return str(output_path)
+    # Sortie formatée pour l'orchestrateur (n8n)
+    result = {
+        "status": "success",
+        "final_video": str(output_final_path.resolve())
+    }
+    
+    print("\n--- OUTPUT JSON POUR N8N ---")
+    print(json.dumps(result))
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Module 5 : Rendu Final (Assemblage & Sous-titres)")
+    parser.add_argument("--input-json", type=str, required=True, help="Chemin vers le fichier script_with_videos.json")
+    
+    args = parser.parse_args()
+    
+    try:
+        assemble_final_video(args.input_json)
+    except Exception as e:
+        print(f"Erreur critique dans le module 5 : {e}", file=sys.stderr)
+        sys.exit(1)

@@ -1,108 +1,96 @@
-import os
-import time
-import base64
-import requests
-from runwayml import RunwayML
-from moviepy import ImageClip
-from src.models import VideoScript
-from config import WORKSPACE_DIR
+import json
+import argparse
+import sys
+import subprocess
+from pathlib import Path
 
-def _get_base64_data_uri(file_path: str) -> str:
-    """Convertit un fichier local en Base64 Data URI."""
-    with open(file_path, "rb") as image_file:
-        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
-    return f"data:image/jpeg;base64,{encoded_string}"
-
-def _generate_with_moviepy(image_path: str, output_path: str, duration: int = 5):
-    """Génère une vidéo statique de secours via MoviePy v2."""
-    try:
-        clip = ImageClip(image_path)
-        clip = clip.with_duration(duration)
-        clip.write_videofile(
-            output_path, 
-            fps=24, 
-            codec="libx264", 
-            preset="ultrafast", 
-            logger=None
-        )
-        clip.close()
-    except Exception as e:
-        raise RuntimeError(f"Erreur d'exportation MoviePy : {e}")
-
-def _generate_with_runway(image_path: str, prompt: str, output_path: str, client: RunwayML):
-    """Génère une vidéo animée via l'API RunwayML."""
-    prompt_image_uri = _get_base64_data_uri(image_path)
+def generate_videos_kenburns(input_json_path: str, duration: int = 4):
+    print(f"Démarrage du Module 4 (Animation 2.5D via FFmpeg) à partir de : {input_json_path}")
     
-    task = client.image_to_video.create(
-        model="gen3a_turbo",
-        prompt_image=prompt_image_uri,
-        prompt_text=prompt
-    )
-    
-    print(f"Tâche Runway envoyée (ID: {task.id}). En attente du rendu...")
-    
-    while task.status not in ["SUCCEEDED", "FAILED", "CANCELLED"]:
-        time.sleep(10)
-        task = client.tasks.retrieve(task.id)
-        print(f"Statut Runway : {task.status}")
-        
-    if task.status == "SUCCEEDED":
-        video_url = task.output[0]
-        response = requests.get(video_url)
-        with open(output_path, 'wb') as f:
-            f.write(response.content)
-    else:
-        raise RuntimeError(f"Échec de la génération Runway. Statut final : {task.status}")
+    input_path = Path(input_json_path)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Le fichier {input_json_path} est introuvable.")
 
-def generate_videos(script: VideoScript, project_id: str, api_choice: str = "moviepy") -> VideoScript:
-    """
-    Point d'entrée modulaire pour la génération de vidéos.
-    Supporte 'moviepy' ou 'runway'.
-    """
-    print(f"Génération des vidéos en cours (Moteur : {api_choice}) pour le projet '{project_id}'...")
+    with open(input_path, 'r', encoding='utf-8') as f:
+        script_data = json.load(f)
 
-    videos_dir = WORKSPACE_DIR / project_id / "videos"
+    project_dir = input_path.parent
+    videos_dir = project_dir / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialisation conditionnelle du client
-    runway_client = None
-    if api_choice == "runway":
-        runway_client = RunwayML()
+    generated_videos = []
 
-    for scene in script.scenes:
-        if not scene.image_path or not os.path.exists(scene.image_path):
-            print(f"Image introuvable pour la scène {scene.id}. Ignorée.")
-            continue
-            
-        output_path = str(videos_dir / f"scene_{scene.id}.mp4")
-        scene.video_path = output_path
+    for scene in script_data.get("scenes", []):
+        scene_id = scene.get("id")
+        image_path_str = scene.get("image_path")
         
-        print(f"Traitement de la scène {scene.id}/{len(script.scenes)}...")
+        if not image_path_str:
+            print(f"Avertissement : Aucune image pour la scène {scene_id}. Ignorée.")
+            continue
+
+        image_path = Path(image_path_str)
+        if not image_path.exists():
+            continue
+
+        output_video_path = videos_dir / f"scene_{scene_id}.mp4"
+        print(f"Génération de l'animation (Zoom in) pour la scène {scene_id}...")
+        
+        # Calcul du nombre de frames (24 fps * durée)
+        frames = duration * 24
         
         try:
-            if api_choice == "moviepy":
-                _generate_with_moviepy(scene.image_path, output_path)
-            elif api_choice == "runway":
-                _generate_with_runway(scene.image_path, scene.visual_prompt, output_path, runway_client)
-            else:
-                raise ValueError(f"Moteur de rendu '{api_choice}' non reconnu.")
+            # Commande FFmpeg pure CPU pour un effet Ken Burns fluide
+            command = [
+                "ffmpeg", "-y", "-loop", "1",
+                "-i", str(image_path.resolve()),
+                "-vf", f"zoompan=z='min(zoom+0.0015,1.5)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=768x1344",
+                "-c:v", "libx264",
+                "-t", str(duration),
+                "-pix_fmt", "yuv420p",
+                str(output_video_path.resolve())
+            ]
+            
+            process = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            if not output_video_path.exists() or process.returncode != 0:
+                raise RuntimeError(f"Échec FFmpeg :\n{process.stderr}")
                 
+            generated_videos.append({
+                "scene_id": scene_id,
+                "video_path": str(output_video_path.resolve())
+            })
+            print(f"Vidéo {scene_id} générée avec succès : {output_video_path}")
+            
         except Exception as e:
-            print(f"Erreur lors du traitement de la scène {scene.id}: {e}")
+            raise RuntimeError(f"Erreur lors de l'animation de la scène {scene_id} : {e}")
 
-    print("Génération des vidéos terminée.")
-    return script
+    for scene in script_data.get("scenes", []):
+        for vid_data in generated_videos:
+            if scene["id"] == vid_data["scene_id"]:
+                scene["video_path"] = vid_data["video_path"]
+
+    updated_json_path = project_dir / "script_with_videos.json"
+    with open(updated_json_path, 'w', encoding='utf-8') as f:
+        json.dump(script_data, f, indent=4, ensure_ascii=False)
+
+    result = {
+        "status": "success",
+        "videos_count": len(generated_videos),
+        "updated_script": str(updated_json_path.resolve())
+    }
+    
+    print("\n--- OUTPUT JSON POUR N8N ---")
+    print(json.dumps(result))
 
 if __name__ == "__main__":
-    from src.generators.script_gen import generate_script
-    from src.generators.image_gen import generate_images
+    parser = argparse.ArgumentParser(description="Module 4 : Animation 2.5D via FFmpeg")
+    parser.add_argument("--input-json", type=str, required=True, help="Chemin vers le fichier script_with_images.json")
+    parser.add_argument("--duration", type=int, default=4, help="Durée de chaque clip animé en secondes")
     
-    test_theme = "La Pissodynamique quantique"
+    args = parser.parse_args()
     
-    script_obj = generate_script(test_theme)
-    script_obj.scenes = script_obj.scenes[:1]
-    
-    script_obj = generate_images(script_obj, project_id="test_modulaire", api_choice="dummy")
-    
-    # Test avec MoviePy (par défaut)
-    script_obj = generate_videos(script_obj, project_id="test_modulaire", api_choice="moviepy")
+    try:
+        generate_videos_kenburns(args.input_json, args.duration)
+    except Exception as e:
+        print(f"Erreur critique dans le module 4 : {e}", file=sys.stderr)
+        sys.exit(1)
